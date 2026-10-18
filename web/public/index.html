@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>HL Vault Bot — Dashboard</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #131722; --panel2: #1a2030;
+    --border: #232a3b; --fg: #e6e9f0; --muted: #8a93a8;
+    --accent: #4dd6a1; --accent2: #5aa9ff; --warn: #ffb454; --bad: #ff6b6b;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.5; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 32px 20px 80px; }
+  header { display: flex; align-items: baseline; justify-content: space-between;
+    flex-wrap: wrap; gap: 12px; margin-bottom: 8px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.3px; }
+  h1 .tag { color: var(--accent); }
+  .sub { color: var(--muted); font-size: 13px; }
+  .banner { margin: 16px 0 28px; padding: 10px 14px; border-radius: 10px;
+    background: rgba(90,169,255,0.08); border: 1px solid rgba(90,169,255,0.25);
+    color: var(--accent2); font-size: 13px; }
+  h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 1px;
+    color: var(--muted); margin: 36px 0 14px; font-weight: 600; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr));
+    gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--border);
+    border-radius: 14px; padding: 18px 20px; }
+  .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase;
+    letter-spacing: 0.5px; }
+  .card .value { font-size: 26px; font-weight: 700; margin-top: 6px;
+    font-family: var(--mono); }
+  .pos { color: var(--accent); } .neg { color: var(--bad); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px;
+    background: var(--panel); border-radius: 14px; overflow: hidden;
+    border: 1px solid var(--border); }
+  th, td { padding: 11px 14px; text-align: right; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; text-transform: uppercase;
+    font-size: 11px; letter-spacing: 0.5px; background: var(--panel2); }
+  th:first-child, td:first-child { text-align: left; }
+  tr:last-child td { border-bottom: none; }
+  td.name { font-weight: 600; }
+  td.num { font-family: var(--mono); }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 20px;
+    font-size: 11px; font-family: var(--mono); }
+  .pill.lock { background: rgba(255,180,84,0.15); color: var(--warn); }
+  .addr { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+  .empty { color: var(--muted); padding: 24px; text-align: center;
+    background: var(--panel); border-radius: 14px; border: 1px solid var(--border); }
+  .cfg { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .cfg span { background: var(--panel2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 4px 10px; font-size: 12px; font-family: var(--mono);
+    color: var(--muted); }
+  footer { margin-top: 48px; color: var(--muted); font-size: 12px;
+    text-align: center; }
+  a { color: var(--accent2); }
+  .bar { height: 6px; background: var(--panel2); border-radius: 4px;
+    overflow: hidden; margin-top: 4px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>HL Vault Bot <span class="tag">· Dashboard</span></h1>
+      <div class="sub" id="generated">lade…</div>
+    </div>
+    <div class="cfg" id="cfg"></div>
+  </header>
+
+  <div class="banner">
+    📄 Read-only. Papertrading-Werte sind virtuell — kein echtes Geld, keine Transaktionen.
+    Renditen = reale Vault-Performance seit Einstieg.
+  </div>
+
+  <section>
+    <h2>Papertrading-Portfolio</h2>
+    <div id="paper"></div>
+  </section>
+
+  <section>
+    <h2>Positionen</h2>
+    <div id="positions"></div>
+  </section>
+
+  <section>
+    <h2>Screener — qualifizierte Vaults</h2>
+    <div id="screener"></div>
+  </section>
+
+  <footer>
+    hl-vault-bot · statischer Export · <span id="foot"></span>
+  </footer>
+</div>
+
+<script>
+const fmtUsd = x => x==null ? "–" : "$" + Number(x).toLocaleString("de-CH",{minimumFractionDigits:2,maximumFractionDigits:2});
+const fmtPct = x => x==null ? "–" : (x>=0?"+":"") + (x*100).toFixed(2) + "%";
+const fmtNum = (x,d=2) => x==null ? "–" : Number(x).toLocaleString("de-CH",{minimumFractionDigits:d,maximumFractionDigits:d});
+const fmtK   = x => x==null ? "–" : x>=1e6 ? (x/1e6).toFixed(1)+"M" : x>=1e3 ? (x/1e3).toFixed(0)+"k" : Math.round(x);
+const cls    = x => x==null ? "" : x>=0 ? "pos" : "neg";
+const short  = a => a ? a.slice(0,6)+"…"+a.slice(-4) : "";
+const dt     = ms => ms ? new Date(ms).toLocaleString("de-CH",{dateStyle:"medium",timeStyle:"short"}) : "–";
+
+fetch("data.json?" + Date.now())
+  .then(r => r.json())
+  .then(render)
+  .catch(e => { document.getElementById("paper").innerHTML =
+    `<div class="empty">Konnte data.json nicht laden: ${e}</div>`; });
+
+function render(d) {
+  document.getElementById("generated").textContent =
+    "Stand: " + dt(d.generated_at);
+  document.getElementById("foot").textContent = dt(d.generated_at);
+
+  const c = d.config || {};
+  document.getElementById("cfg").innerHTML = [
+    `maxDD ≤ ${(c.max_drawdown*100).toFixed(0)}%`,
+    `vol ≤ ${(c.max_vol_annual*100).toFixed(0)}%`,
+    `Alter ≥ ${c.min_age_days}d`,
+    c.equal_weight ? "Gleichgewicht" : "Score-gewichtet",
+    `max ${c.max_positions} Pos`,
+  ].map(t => `<span>${t}</span>`).join("");
+
+  // --- Paper ---
+  const p = d.paper;
+  const paperEl = document.getElementById("paper");
+  const posEl = document.getElementById("positions");
+  if (!p) {
+    paperEl.innerHTML = `<div class="empty">Kein Papertrading-Portfolio. Lege eins an:<br><code>python3 -m hlvault.cli paper init 5000</code></div>`;
+    posEl.innerHTML = "";
+  } else if (p.error) {
+    paperEl.innerHTML = `<div class="empty">Portfolio vorhanden, Bewertung fehlgeschlagen: ${p.error}</div>`;
+  } else {
+    const ret = p.total_return_pct;
+    paperEl.innerHTML = `<div class="cards">
+      <div class="card"><div class="label">Gesamtwert</div><div class="value ${cls(ret)}">${fmtUsd(p.total)}</div></div>
+      <div class="card"><div class="label">Rendite</div><div class="value ${cls(ret)}">${fmtPct(ret)}</div></div>
+      <div class="card"><div class="label">Investiert</div><div class="value">${fmtUsd(p.invested_value)}</div></div>
+      <div class="card"><div class="label">Cash</div><div class="value">${fmtUsd(p.cash)}</div></div>
+      <div class="card"><div class="label">Startkapital</div><div class="value">${fmtUsd(p.start_capital)}</div></div>
+    </div>`;
+
+    const rows = (p.positions||[]).sort((a,b)=>b.value-a.value);
+    posEl.innerHTML = rows.length ? `<table>
+      <thead><tr><th>Vault</th><th>Einsatz</th><th>Wert</th><th>Rendite</th><th>Alter</th><th>Fee</th><th></th></tr></thead>
+      <tbody>${rows.map(r=>`<tr>
+        <td class="name">${r.name}<div class="addr">${short(r.address)}</div></td>
+        <td class="num">${fmtUsd(r.usd_in)}</td>
+        <td class="num">${fmtUsd(r.value)}</td>
+        <td class="num ${cls(r.return_pct)}">${fmtPct(r.return_pct)}</td>
+        <td class="num">${Math.round(r.age_days)}d</td>
+        <td class="num">${fmtUsd(r.fee)}</td>
+        <td>${r.locked?'<span class="pill lock">Lockup</span>':''}</td>
+      </tr>`).join("")}</tbody></table>` :
+      `<div class="empty">Keine offenen Positionen.</div>`;
+  }
+
+  // --- Screener ---
+  const s = d.screener;
+  const scEl = document.getElementById("screener");
+  const vs = (s && s.vaults) || [];
+  if (!vs.length) {
+    scEl.innerHTML = `<div class="empty">Kein Screener-Snapshot. Erzeuge einen:<br><code>python3 -m hlvault.export_web --screen</code></div>`;
+  } else {
+    const maxScore = Math.max(...vs.map(v=>v.score||0), 1);
+    scEl.innerHTML = `<table>
+      <thead><tr><th>#</th><th>Vault</th><th>Score</th><th>Sharpe</th><th>CAGR</th><th>MaxDD</th><th>TVL</th><th>Alter</th></tr></thead>
+      <tbody>${vs.map(v=>`<tr>
+        <td class="num">${v.rank}</td>
+        <td class="name">${v.name}
+          <div class="bar"><i style="width:${(v.score/maxScore*100).toFixed(0)}%"></i></div>
+          <div class="addr">${short(v.address)}</div></td>
+        <td class="num">${fmtNum(v.score,1)}</td>
+        <td class="num">${fmtNum(v.sharpe)}</td>
+        <td class="num ${cls(v.cagr)}">${v.cagr==null?"–":fmtPct(v.cagr)}</td>
+        <td class="num ${cls(v.max_drawdown)}">${v.max_drawdown==null?"–":fmtPct(v.max_drawdown)}</td>
+        <td class="num">${fmtK(v.tvl)}</td>
+        <td class="num">${Math.round(v.age_days)}d</td>
+      </tr>`).join("")}</tbody></table>`;
+  }
+}
+</script>
+</body>
+</html>

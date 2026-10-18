@@ -37,6 +37,35 @@ CREATE TABLE IF NOT EXISTS runs (
     passed        INTEGER,
     note          TEXT
 );
+
+-- Papertrading: virtuelles Portfolio, kein echtes Geld ------------------
+CREATE TABLE IF NOT EXISTS paper_portfolio (
+    id            INTEGER PRIMARY KEY CHECK (id = 1),  -- nur ein Portfolio
+    created_ts    INTEGER NOT NULL,
+    start_capital REAL    NOT NULL,
+    cash          REAL    NOT NULL   -- noch nicht investiertes virtuelles USD
+);
+
+CREATE TABLE IF NOT EXISTS paper_positions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    vault_address TEXT    NOT NULL,
+    name          TEXT,
+    usd_in        REAL    NOT NULL,  -- eingezahltes virtuelles USD (Kostenbasis)
+    entry_ts      INTEGER NOT NULL,  -- fuer Lockup + Return-Referenz
+    hwm_ratio     REAL    NOT NULL DEFAULT 1.0,  -- High-Water-Mark fuer Profit-Share
+    open          INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_pp_vault ON paper_positions(vault_address, open);
+
+CREATE TABLE IF NOT EXISTS paper_ledger (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            INTEGER NOT NULL,
+    action        TEXT    NOT NULL,  -- init/deposit/withdraw/exit/fee/mark
+    vault_address TEXT,
+    name          TEXT,
+    usd           REAL,
+    note          TEXT
+);
 """
 
 

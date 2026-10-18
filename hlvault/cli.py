@@ -11,6 +11,8 @@ import sys
 from . import allocator, db, screener
 from .config import CONFIG
 
+CACHE_PATH = "data/backtest_cache/snapshot.json"
+
 
 def _fmt_usd(x: float) -> str:
     if x >= 1_000_000:
@@ -135,6 +137,157 @@ def cmd_watch(args) -> int:
     return 0
 
 
+def cmd_fetch_cache(args) -> int:
+    """Detaildaten der Kandidaten einmal holen und cachen (fuer backtest)."""
+    import os
+    import time
+
+    from . import api
+
+    print("Lade Vault-Liste ...", flush=True)
+    raw = api.fetch_all_vaults()
+    cands = screener.prefilter(raw, CONFIG)
+    print(f"{len(raw)} Vaults -> {len(cands)} nach Vorfilter", flush=True)
+    cands = cands[: CONFIG.top_n_detail]
+
+    def prog(i, n):
+        if i % 10 == 0 or i == n:
+            print(f"  Details {i}/{n}", flush=True)
+
+    details = api.fetch_details_bulk([c.address for c in cands], on_progress=prog)
+    meta = {c.address: {"name": c.name, "leader": c.leader, "apr": c.apr}
+            for c in cands}
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    with open(args.out, "w") as fh:
+        json.dump({"details": details, "meta": meta,
+                   "fetched_at": int(time.time() * 1000)}, fh)
+    print(f"\n{len(details)} Details gecacht -> {args.out}")
+    return 0
+
+
+def cmd_backtest(args) -> int:
+    """Walk-Forward-Backtest: schlaegt der Score APR und Gleichgewicht?"""
+    import datetime as _dt
+    import os
+
+    from . import backtest as bt
+
+    if not os.path.exists(args.cache):
+        print(f"Kein Cache unter {args.cache}. Erst:  "
+              f"python3 -m hlvault.cli fetch-cache")
+        return 1
+
+    horizons = tuple(int(x) for x in args.horizons.split(","))
+    res = bt.walk_forward(args.cache, horizons=horizons,
+                          n_cutoffs=args.cutoffs, gap_days=args.gap, k=args.k)
+    if args.json:
+        with open(args.json, "w") as fh:
+            json.dump(res, fh, indent=2)
+
+    def d(ms):
+        return _dt.datetime.fromtimestamp(ms / 1000, _dt.timezone.utc).date()
+
+    def f(x):
+        return f"{x*100:+8.1f}%" if x is not None else "     n/a"
+
+    print(f"\nWalk-Forward-Backtest | Universum {res['n_vaults']} Vaults | "
+          f"K={res['k']} | Stichtage={args.cutoffs} | Gap={args.gap}d")
+    print("Ranking je Stichtag NUR aus Daten bis dahin (out-of-sample).\n")
+    for H, blk in res["horizons"].items():
+        print(f"===== Forward-Horizont {H} Tage =====")
+        print(f"{'Stichtag':12} {'qual':>4} {'Score-Top':>10} {'APR-Top':>9}"
+              f" {'Gleichgew':>10} {'Score-Bot':>10} {'Universum':>10}")
+        for w in blk["windows"]:
+            s = w["strat"]
+            print(f"{str(d(w['cutoff_ms'])):12} {w['qualified']:>4}  "
+                  f"{f(s.get('score_top'))} {f(s.get('apr_top'))} "
+                  f"{f(s.get('equal_qualified'))} {f(s.get('score_bottom'))} "
+                  f"{f(s.get('universe'))}")
+        sm = blk["summary"]
+        print("  --- Mittel ueber Stichtage ---")
+        labels = {"score_top": "Score-Top-K", "apr_top": "APR-Top-K (naiv)",
+                  "equal_qualified": "Gleichgewicht", "score_bottom": "Score-Bottom-K",
+                  "universe": "ganzes Universum"}
+        for name in ["score_top", "apr_top", "equal_qualified",
+                     "score_bottom", "universe"]:
+            if name in sm:
+                print(f"    {labels[name]:20} {sm[name]['mean_fwd']*100:+7.2f}%"
+                      f"   (n={sm[name]['windows']})")
+        print()
+    if args.json:
+        print(f"JSON -> {args.json}")
+    return 0
+
+
+def cmd_paper(args) -> int:
+    """Papertrading: virtuelles Portfolio gegen echte Vault-Renditen."""
+    import datetime as _dt
+
+    from . import paper
+
+    conn = db.connect()
+
+    if args.paper_cmd == "init":
+        paper.init_portfolio(conn, args.capital)
+        print(f"Virtuelles Portfolio angelegt: ${args.capital:,.2f} Startkapital.")
+        print("Naechster Schritt:  python3 -m hlvault.cli paper rebalance")
+        return 0
+
+    pf = paper.get_portfolio(conn)
+    if not pf:
+        print("Kein Portfolio. Erst:  python3 -m hlvault.cli paper init <kapital>")
+        return 1
+
+    if args.paper_cmd == "rebalance":
+        results, total = screener.run(CONFIG, verbose=not args.quiet)
+        # Positionen werden in paper einzeln gegen Live-Detaildaten bewertet.
+        actions = paper.rebalance(conn, results, {}, CONFIG)
+        print("\nRebalance (virtuell, keine echten Transaktionen):")
+        for a in actions:
+            usd = f"${a['usd']:>10,.2f}" if a["usd"] else " " * 11
+            print(f"  {a['action']:12} {a['name'][:28]:30}{usd}  {a.get('note','')}")
+        _print_paper_status(conn, paper, _dt)
+        return 0
+
+    if args.paper_cmd == "status":
+        _print_paper_status(conn, paper, _dt)
+        return 0
+
+    if args.paper_cmd == "ledger":
+        rows = paper.ledger(conn, args.limit)
+        print(f"{'Datum':20}{'Aktion':12}{'USD':>12}  Vault / Notiz")
+        for r in rows:
+            d = _dt.datetime.fromtimestamp(r["ts"] / 1000).strftime("%Y-%m-%d %H:%M")
+            usd = f"${r['usd']:,.2f}" if r["usd"] is not None else ""
+            nm = r["name"] or ""
+            print(f"{d:20}{r['action']:12}{usd:>12}  {nm} {r['note'] or ''}")
+        return 0
+    return 0
+
+
+def _print_paper_status(conn, paper, _dt) -> None:
+    mtm = paper.mark_to_market(conn, {}, CONFIG)
+    if not mtm:
+        print("Kein Portfolio.")
+        return
+    created = _dt.datetime.fromtimestamp(mtm["created_ts"] / 1000).strftime("%Y-%m-%d")
+    print(f"\n=== Papertrading-Status (seit {created}) ===")
+    print(f"  Startkapital : ${mtm['start_capital']:>12,.2f}")
+    print(f"  Cash         : ${mtm['cash']:>12,.2f}")
+    print(f"  Investiert   : ${mtm['invested_value']:>12,.2f}")
+    print(f"  GESAMTWERT   : ${mtm['total']:>12,.2f}  "
+          f"({mtm['total_return_pct']:+.2%})")
+    if mtm["positions"]:
+        print(f"\n  {'Vault':30}{'Einsatz':>12}{'Wert':>12}{'Rendite':>10}"
+              f"{'Alter':>7}{'Fee':>9}")
+        for p in sorted(mtm["positions"], key=lambda x: -x["value"]):
+            lock = " (Lockup)" if p["locked"] else ""
+            print(f"  {p['name'][:28]:30}${p['usd_in']:>10,.2f}"
+                  f"${p['value']:>10,.2f}{p['return_pct']:>+9.1%}"
+                  f"{p['age_days']:>6.0f}d${p['fee']:>7,.2f}{lock}")
+    print("\n  Kein echtes Geld. Rendite = reale Vault-Performance seit Einstieg.")
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="hlvault",
                                 description="Hyperliquid Vault Screener (read-only)")
@@ -160,6 +313,33 @@ def main(argv=None) -> int:
     w = sub.add_parser("watch", help="Taeglicher Check + Alerts")
     w.add_argument("-n", "--limit", type=int, default=10)
     w.set_defaults(func=cmd_watch)
+
+    fc = sub.add_parser("fetch-cache",
+                        help="Detaildaten einmal holen und cachen (fuer backtest)")
+    fc.add_argument("--out", default=CACHE_PATH)
+    fc.set_defaults(func=cmd_fetch_cache)
+
+    bt = sub.add_parser("backtest",
+                        help="Walk-Forward-Backtest gegen historische PnL-Serien")
+    bt.add_argument("--cache", default=CACHE_PATH)
+    bt.add_argument("--horizons", default="60,90",
+                    help="Forward-Fenster in Tagen, komma-getrennt")
+    bt.add_argument("--cutoffs", type=int, default=6, help="Anzahl Stichtage")
+    bt.add_argument("--gap", type=int, default=60, help="Abstand der Stichtage (Tage)")
+    bt.add_argument("-k", type=int, default=4, help="Portfoliogroesse (Top-K)")
+    bt.add_argument("--json", help="Rohergebnis als JSON speichern")
+    bt.set_defaults(func=cmd_backtest)
+
+    pp = sub.add_parser("paper",
+                        help="Papertrading: virtuelles Portfolio, kein echtes Geld")
+    psub = pp.add_subparsers(dest="paper_cmd", required=True)
+    pi = psub.add_parser("init", help="Virtuelles Portfolio anlegen")
+    pi.add_argument("capital", type=float)
+    psub.add_parser("rebalance", help="Screenen + virtuell allozieren/rebalancen")
+    psub.add_parser("status", help="Aktueller Portfoliowert (mark-to-market)")
+    pl = psub.add_parser("ledger", help="Transaktions-/Ereignis-Log")
+    pl.add_argument("-n", "--limit", type=int, default=50)
+    pp.set_defaults(func=cmd_paper)
 
     args = p.parse_args(argv)
     return args.func(args)

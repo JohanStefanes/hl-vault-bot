@@ -1,0 +1,6 @@
+{
+  "name": "hl-vault-dashboard",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Statisches Dashboard fuer den hl-vault-bot (read-only)"
+}

@@ -8,15 +8,25 @@ from .config import CONFIG, Config
 
 
 def propose(results, capital_usd: float, cfg: Config = CONFIG) -> list[dict]:
-    """Top-N nach Score, score-gewichtet, mit Cap pro Vault."""
+    """Allokation ueber die Qualifizierten, mit Cap pro Vault.
+
+    Default (portfolio.equal_weight=True): GLEICHGEWICHT. Der Backtest zeigt,
+    dass Score-Ranking innerhalb der Qualifizierten nicht trennt und Gleich-
+    gewicht ueber mehr Vaults den Tail-Risk drueckt. Score dient nur als
+    Reihenfolge fuer die Kappung auf max_positions.
+    """
     p = cfg.portfolio
     picks = [r for r in results if r.passed][: p.max_positions]
     if not picks:
         return []
 
-    raw = {r.address: max(r.score, 1.0) for r in picks}
-    total = sum(raw.values())
-    weights = {a: v / total for a, v in raw.items()}
+    if p.equal_weight:
+        w = 1.0 / len(picks)
+        weights = {r.address: w for r in picks}
+    else:
+        raw = {r.address: max(r.score, 1.0) for r in picks}
+        total = sum(raw.values())
+        weights = {a: v / total for a, v in raw.items()}
 
     # Cap durchsetzen und Ueberhang auf die anderen umverteilen
     for _ in range(10):

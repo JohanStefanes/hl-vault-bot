@@ -76,6 +76,8 @@ def score_one(r: Result, cfg: Config = CONFIG) -> Result:
         r.reasons.append(f"nur {mt.n} Datenpunkte")
     if mt.max_drawdown < -f.max_drawdown:
         r.reasons.append(f"MaxDD {mt.max_drawdown:.1%} > {f.max_drawdown:.0%}")
+    if mt.vol_annual > f.max_vol_annual:
+        r.reasons.append(f"Vol {mt.vol_annual:.0%} > {f.max_vol_annual:.0%} (Leverage-Casino)")
     if r.leader_fraction < f.min_leader_fraction:
         r.reasons.append(f"Leader nur {r.leader_fraction:.1%} eigenes Kapital")
     if r.leader_commission > f.max_leader_commission:
