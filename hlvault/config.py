@@ -19,10 +19,9 @@ DETAIL_SLEEP = 0.15  # Sekunden zwischen vaultDetails-Requests (Rate-Limit schon
 class Filters:
     """Harte Ausschlusskriterien. Wer hier durchfaellt wird gar nicht erst bewertet.
 
-    Schwellen aus dem Walk-Forward-Backtest (experiments/) kalibriert:
-    strengerer maxDD + vol-Cap + breiteres Alter/TVL-Fenster senkten das
-    schlechteste 90-Tage-Fenster von -11% (alt) auf +0.6% (Strategie C),
-    bei zugleich hoeherer Durchschnittsrendite.
+    Backtest mit geschlossenen Vaults (README): strengerer maxDD + vol-Cap senken
+    das Verlustrisiko im schlechtesten 90-Tage-Fenster. Ein Renditevorteil ist
+    damit nicht belegt.
     """
 
     min_tvl: float = 50_000.0          # breiter: mehr Kandidaten -> echte Auswahl
@@ -40,10 +39,10 @@ class Filters:
 class Weights:
     """Score-Gewichte, Summe sollte 1.0 sein.
 
-    ACHTUNG (Backtest-Ergebnis): kein Einzelsignal korreliert messbar mit der
-    Forward-Rendite (|Spearman| < 0.1 ueber 300+ Vault-Stichtag-Paare). Der
+    ACHTUNG (Backtest-Ergebnis): kein Einzelsignal korreliert nennenswert mit der
+    Forward-Rendite (|Spearman| <= 0.12 ueber rund 3700 Vault-Stichtag-Paare). Der
     Score taugt darum als TIE-BREAKER und fuer Transparenz, NICHT als belegter
-    Renditevorteil. Der reale Edge sitzt in den harten Filtern + Gleichgewicht.
+    Renditevorteil. Belegt ist nur weniger Risiko durch Filter + Streuung.
     Gewichte hier nicht auf die paar Stichtage overfitten.
     """
 
@@ -61,9 +60,9 @@ class Weights:
 class Portfolio:
     """Allokations-Regeln fuer die spaetere Rebalance-Phase.
 
-    Konstruktion aus dem Backtest (Strategie C): GLEICHGEWICHT ueber alle
-    Qualifizierten, nicht Score-gewichtetes Top-4. Diversifikation ueber ~10-13
-    Vaults drueckt den Tail-Risk (schlechtestes Fenster von -11% auf ~0%).
+    Backtest (Strategie C): Gleichgewicht ueber alle Qualifizierten hatte das
+    kleinste Verlustfenster (-5.5%, mit 8 Positionen -10.2%). max_positions=4 weicht
+    wegen des kleinen Kapitals bewusst davon ab und traegt mehr Einzelrisiko.
     """
 
     equal_weight: bool = True         # gleichgewichten statt Score-gewichten

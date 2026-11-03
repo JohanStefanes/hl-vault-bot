@@ -1,6 +1,7 @@
 """SQLite-Persistenz: taegliche Snapshots von Score + TVL pro Vault."""
 from __future__ import annotations
 
+import gzip
 import json
 import sqlite3
 import time
@@ -36,6 +37,14 @@ CREATE TABLE IF NOT EXISTS runs (
     candidates    INTEGER,
     passed        INTEGER,
     note          TEXT
+);
+
+-- Komplette Vault-Liste pro Tag, inkl. geschlossener Vaults. Spaeter die
+-- Grundlage fuer ein Backtest-Universum ohne Survivorship-Bias.
+CREATE TABLE IF NOT EXISTS vault_list_snapshots (
+    day           TEXT PRIMARY KEY,  -- YYYY-MM-DD (UTC)
+    ts            INTEGER NOT NULL,
+    vaults        BLOB    NOT NULL   -- gzip-JSON, rund 700 KB pro Tag
 );
 
 -- Papertrading: virtuelles Portfolio, kein echtes Geld ------------------
@@ -99,13 +108,42 @@ def save_run(conn: sqlite3.Connection, results: list, total_vaults: int,
                 r.metrics.max_drawdown if r.metrics else None,
                 r.age_days, r.leader_fraction, int(r.passed),
                 "; ".join(r.reasons),
-                json.dumps(r.metrics.as_row() if r.metrics else {}),
+                # Commission mit sichern: die API liefert keinen Verlauf davon
+                json.dumps({**(r.metrics.as_row() if r.metrics else {}),
+                            "leader_commission": r.leader_commission}),
             )
             for r in results
         ],
     )
     conn.commit()
     return ts
+
+
+def save_vault_list(conn: sqlite3.Connection, raw_vaults: list[dict]) -> str:
+    """Speichert die Vault-Liste von heute. Ein Lauf am selben Tag ersetzt sie."""
+    ts = int(time.time() * 1000)
+    day = time.strftime("%Y-%m-%d", time.gmtime(ts / 1000))
+    rows = []
+    for v in raw_vaults:
+        s = v.get("summary") or {}
+        rows.append({
+            "address": s.get("vaultAddress"), "name": s.get("name"),
+            "leader": s.get("leader"), "tvl": s.get("tvl"),
+            "closed": bool(s.get("isClosed")), "apr": v.get("apr"),
+            "created": s.get("createTimeMillis"),
+            "child": (s.get("relationship") or {}).get("type") == "child",
+        })
+    conn.execute(
+        "INSERT OR REPLACE INTO vault_list_snapshots (day,ts,vaults) VALUES (?,?,?)",
+        (day, ts, gzip.compress(json.dumps(rows).encode())))
+    conn.commit()
+    return day
+
+
+def load_vault_list(conn: sqlite3.Connection, day: str) -> list[dict] | None:
+    row = conn.execute("SELECT vaults FROM vault_list_snapshots WHERE day=?",
+                       (day,)).fetchone()
+    return json.loads(gzip.decompress(row["vaults"])) if row else None
 
 
 def history(conn: sqlite3.Connection, address: str, limit: int = 60) -> list[dict]:

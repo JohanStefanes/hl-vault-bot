@@ -52,16 +52,17 @@ Wie gescored wird
 
 Zweistufig, weil 9500 Detail-Requests unnoetig waeren:
 
-  1. Vorfilter auf der Liste (billig)   -> ~40 Kandidaten
-     offen, kein Child-Vault, TVL 250k..250M, Alter >= 120 Tage
+  1. Vorfilter auf der Liste (billig)   -> ~90 Kandidaten
+     offen, kein Child-Vault, TVL 50k..1B, Alter >= 90 Tage
   2. Detaildaten fuer die Kandidaten, dann Kennzahlen + Score
 
 Kennzahlen (metrics.py) kommen aus pnlHistory RELATIV zu accountValueHistory.
 Roher PnL waere irrefuehrend: ein Vault der nur viel Kapital eingesammelt hat
-sieht sonst automatisch gut aus.
+sieht sonst automatisch gut aus. Zufluesse im selben Intervall zaehlen halb zur
+Basis (Modified Dietz), sonst entstehen Renditen wie -12115%.
 
 Harte Ausschluesse (config.py -> Filters):
-  MaxDD > 25%, leaderFraction < 3%, Commission > 15%,
+  MaxDD > 15%, Vol > 100%, leaderFraction < 3%, Commission > 15%,
   < 20 Datenpunkte, CAGR <= 0
 
 Score 0..100, gewichtet (config.py -> Weights):
@@ -87,7 +88,7 @@ Hyperliquid-Constraints, die die Strategie bestimmen
   - Vaults koennen liquidiert werden. Totalverlust ist moeglich.
 
 Daraus folgt: NICHT "immer im besten Vault". Das ist Performance-Chasing und
-der Hauptgrund warum solche Bots verlieren. Stattdessen 3-4 Vaults, Cap 30%,
+der Hauptgrund warum solche Bots verlieren. Stattdessen 4 Vaults, Cap 30%,
 Rebalance woechentlich mit Hysterese (rotation_margin), plus taeglicher
 Reissleinen-Check (watch).
 
@@ -98,8 +99,9 @@ Bekannte Einschraenkungen
   - followers ist API-seitig bei 100 gedeckelt -> kein echtes Signal, nur Anzeige
   - accountValueHistory ist gebinnt, nicht taeglich -> Sharpe ist eine
     Naeherung, gut fuer relatives Ranking, nicht als absolute Zahl lesen
-  - Kein Survivorship-Bias-Handling: geschlossene/geblowte Vaults sind aus der
-    Liste raus, das Feld sieht dadurch besser aus als es war
+  - Survivorship-Bias nur teilweise behoben: 'fetch-cache --all' holt
+    geschlossene Vaults mit |PnL| >= $5000. Kleinere fehlen, und die Vault-Liste
+    gibt es erst seit 2026-11-03 als taeglichen Snapshot (db.save_vault_list)
   - leaderFraction schwankt mit dem TVL, nicht mit dem Commitment des Leaders
 
 
@@ -126,101 +128,82 @@ Naechste Schritte (Phase 2+)
 Walk-Forward-Backtest (backtest.py)
 -----------------------------------
 
-Beantwortet die Kernfrage von Phase 2 OHNE auf die 4-6 Wochen DB-Snapshots zu
-warten: die vaultDetails liefern pro Vault Monate an accountValueHistory +
-pnlHistory. Damit laesst sich rueckwirkend testen.
+Testet rueckwirkend, was die Regeln gebracht haetten. Fuer jeden Stichtag zaehlen
+nur Daten bis dahin, gemessen wird die Rendite danach.
 
-    python3 -m hlvault.cli fetch-cache     # einmal: 40 Kandidaten-Details cachen
-    python3 -m hlvault.cli backtest        # gegen den Cache, reproduzierbar
+    python3 -m hlvault.cli fetch-cache --all --out data/backtest_cache/full.json
+    python3 -m hlvault.cli backtest --cache data/backtest_cache/full.json
+    python3 -m unittest discover tests     # Selbstcheck der Logik
 
-Verfahren (kein In-Sample):
-  1. Fuer mehrere Stichtage T (default 6, alle 60 Tage rueckwaerts):
-     jede Serie auf t <= T abschneiden, Metriken + Score NUR daraus, dann ranken.
-  2. Realisierte Rendite jedes Vaults im Fenster (T, T+H] messen (H = 60/90 Tage).
-  3. Strategien vergleichen: Score-Top-K vs. APR-Top-K (naiv) vs. Gleichgewicht
-     aller Qualifizierten vs. Score-Bottom-K vs. ganzes Universum.
+Der volle Abruf dauert rund 40 Minuten und laesst sich fortsetzen. Ohne --all
+fehlen geschlossene Vaults, die Zahlen fallen dann viel zu gut aus.
 
-Ergebnis des ersten Laufs (Cache 2026-09-01, K=4):
+Verfahren:
+  1. Stichtage im Abstand des Horizonts, die Fenster ueberlappen also nicht.
+  2. Vorfilter, Filter und Score nur mit dem Stand am Stichtag.
+  3. Rendite nach Leader-Profit-Share. Jedes Fenster zaehlt als neuer Einstieg.
+  4. Ausgabe: Mittel, Median, schlechtestes Fenster, groesster Drawdown im
+     Fenster und Bootstrap-90%-Intervall des Mittels.
 
-                        60d-Horizont   90d-Horizont
-    Score-Top-K            +4.96%         +8.03%
-    APR-Top-K (naiv)       +7.03%         -6.60%
-    Gleichgewicht          +3.68%         +8.73%
-    Score-Bottom-K         +3.34%         +9.23%
-    ganzes Universum      -38.24%        -79.91%
+Ergebnis (Cache 2026-11-03: 1711 Vaults, davon 919 geschlossen; K=4; 6 Fenster
+zu je 90 Tagen, nach Fee):
+
+                             Mittel  Median   Worst   MaxDD   90%-Intervall
+    Score-Bottom-K            +5.0%   +2.4%   -1.6%   -5.2%   +0.6..+11.3%
+    CAGR-Top-K naiv           +3.4%   +9.1%  -48.0%  -52.5%  -15.3..+19.0%
+    Gleichgew. o. Leader      +0.6%   +2.1%   -4.6%  -13.3%   -1.7..+2.7%
+    Gleichgewicht             +0.4%   +2.2%   -5.7%  -14.1%   -2.2..+2.9%
+    Universum                 -0.5%   -2.0%   -9.6%  -25.3%   -5.7..+4.9%
+    CAGR-Top-K gefiltert      -1.2%   +0.6%  -13.3%  -15.3%   -5.9..+2.7%
+    Score-Top-K               -1.8%   +2.7%  -26.4%  -32.7%  -10.7..+4.2%
 
 Was das ehrlich heisst:
-  - Die FILTER sind das Wertvolle. Das ganze Universum verliert brutal
-    (-38%/-80% durch einzelne Vaults die um -270% einbrechen); alles was durch
-    die harten Ausschluesse kommt, liegt zwischen +3% und +9%. Der Nutzen sitzt
-    im Rauswerfen, nicht im Feinranking.
-  - Nach APR sortieren ist widerlegt: +7% auf 60d, aber -6.6% auf 90d und stark
-    von einem einzelnen +134%-Ausreisser getragen. Genau die Instabilitaet, die
-    das Scoring vermeiden soll.
-  - Score-Top-K schlaegt APR-Top-K auf 90d klar und ist deutlich stabiler.
-  - ABER: Score-Top-K ~= Gleichgewicht ~= Score-Bottom-K. Ursache: nach den
-    Filtern bleiben meist nur 2-7 Vaults, K=4 ist dann fast das ganze Feld ->
-    das Score-RANKING innerhalb der Qualifizierten trennt (noch) nicht. Belegt
-    ist der Wert der Filter, nicht der der Gewichte. Solange das so ist, ist
-    Gleichgewicht ueber alle Qualifizierten die ehrlichere Allokation als ein
-    Score-gewichtetes Top-4.
+  - Kein Renditevorteil belegt. Die Intervalle sind breit und ueberlappen sich
+    fast alle, sechs Fenster reichen nicht fuer mehr.
+  - Der Score trennt nicht: die schlechtesten vier lagen vor den besten vier.
+    Das ist vermutlich Zufall, aber sicher kein Beleg fuer das Ranking.
+  - Belegt ist nur weniger Risiko: Gleichgewicht ueber alle Gefilterten hatte
+    als schlechtestes Fenster -5.7%, die naive Rendite-Auswahl -48.0%.
+  - Vier Positionen sind riskant: Score-Top-K verlor -26.4% in einem Fenster,
+    weil zwei der vier ausgewaehlten Vaults -93% und -51% machten.
 
-Grenzen dieses Backtests (nicht wegzudiskutieren):
-  - Survivorship-Bias: geblowte/geschlossene Vaults sind aus der Liste raus.
-    Das Universum sah in Wahrheit schlechter aus -> der Filtervorteil ist real,
-    aber die absoluten Zahlen sind optimistisch.
-  - leaderFraction/-commission gibt es nur als AKTUELLEN Wert, nicht als
-    Verlauf. Fuer historische Stichtage wird der heutige Wert benutzt -> ein
-    kleiner Lookahead-Rest in den Filtern. Score/Ranking selbst ist sauber
-    out-of-sample.
-  - accountValueHistory ist gebinnt, nicht taeglich -> kurze Fenster sind grob,
-    darum H >= 60 Tage.
-  - Nur 6 Stichtage x 40 Vaults. Richtungsweisend, statistisch nicht hart.
+Fruehere Fassungen dieses Abschnitts nannten +7% bis +9%. Diese Zahlen waren
+falsch: heutiges APR als Auswahlkriterium, keine geschlossenen Vaults, keine
+Fees, ueberlappende Fenster und Renditen von unter -100%.
 
-Konsequenz fuer Phase 3: die Filter behalten, aber das Scoring nicht als
-belegten Edge verkaufen. Erst wenn genug echte DB-Snapshots da sind (Schritt 1)
-oder ein groesseres/aelteres Universum die Qualifizierten-Zahl hebt, laesst sich
-pruefen ob die Gewichte innerhalb der Qualifizierten wirklich trennen.
+Grenzen:
+  - Survivorship-Rest: Vaults mit |PnL| < $5000 fehlen.
+  - leaderFraction/-commission gibt es nur als aktuellen Wert. Die Gegenprobe
+    ohne Leader-Filter weicht aber kaum ab (+0.6% statt +0.4%).
+  - 367 von 66166 Intervallen ergeben rechnerisch -100% oder weniger und zaehlen
+    als Totalverlust. Rund die Haelfte der Vaults hat danach wieder Kapital, das
+    ist teils ein Binning-Artefakt und macht die Zahlen eher zu pessimistisch.
+  - Nur 6 Fenster. Richtungsweisend, statistisch nicht hart.
 
 
-Strategie-Verbesserung (experiments/)
--------------------------------------
+Strategie-Experimente (experiments/)
+------------------------------------
 
-Aufbauend auf dem Backtest wurde die Strategie datengetrieben ueberarbeitet -
-nicht per Bauchgefuehl. Zwei Experimente:
+    PYTHONPATH=. python3 experiments/signal_power.py data/backtest_cache/full.json
+    PYTHONPATH=. python3 experiments/strategy_variants.py data/backtest_cache/full.json
 
-  experiments/signal_power.py
-     Spearman-Rangkorrelation jedes Signals zur Forward-Rendite, gepoolt ueber
-     300+ Vault-Stichtag-Paare. ERGEBNIS: KEIN Einzelsignal sagt die Zukunft
-     vorher, |rho| < 0.1 fuer alle. Sharpe (mit 40% das hoechste Gewicht!) ist
-     sogar leicht negativ. -> An den Gewichten zu drehen waere Overfitting auf
-     Rauschen. Der Score bleibt Tie-Breaker/Transparenz, kein Renditevorteil.
+signal_power: Spearman-Korrelation jedes Signals zur Rendite danach. Auch mit dem
+vollen Cache bleibt jedes Signal schwach (|rho| <= 0.12 ueber rund 3700 Paare).
+Am staerksten: niedrige Volatilitaet und hohes Alter. Sharpe, mit 40% das hoechste
+Gewicht im Score, liegt bei +0.02 auf 90 Tage. Der Score bleibt darum Tie-Breaker.
 
-  experiments/strategy_variants.py
-     Vergleicht Portfolio-REGELN walk-forward. Kernzahl ist das SCHLECHTESTE
-     Einzelfenster (Tail-Risk), nicht der Schnitt:
+strategy_variants: Portfolio-Regeln im Vergleich (Stichtage alle 60 Tage, 90 Tage
+Horizont, die Fenster ueberlappen also; vor Fee):
 
-                                        90d Mittel   90d Worst
-        A alt (DD<25%, Score-Top-4)       +6.6%       -11.0%
-        B breit, Gleichgewicht            +7.0%        -2.8%
-        C strenger (DD<15%,vol<1.0), EW   +8.6%        +0.6%   <- gewinnt
-        D wie C, aber nur 8 Positionen    +5.6%        -4.5%
+                                        Mittel   Worst   Positionen
+    A alt (DD<25%, 4 Positionen)         -4.6%  -24.1%       4
+    B breit, Gleichgewicht               -2.7%  -16.9%      26
+    C streng (DD<15%, vol<1.0), EW       +0.2%   -5.5%      16
+    D wie C, aber 8 Positionen           -2.5%  -10.2%       8
 
-Was tatsaechlich geaendert wurde (config.py), alles aus C:
-  - maxDD-Filter 25% -> 15%   (der eigentliche Tail-Risk-Hebel)
-  - NEU: vol-Cap 100% annualisiert  (schliesst Leverage-Casino-Vaults aus)
-  - TVL-Fenster 250k-250M -> 50k-1B, Alter 120d -> 90d
-    -> Feld waechst von 7 auf ~13 Qualifizierte = echte Auswahl statt "alle 4"
-  - Allokation: Score-gewichtetes Top-4 -> GLEICHGEWICHT ueber bis zu 12 Vaults
-  - panic_drawdown an 15% angeglichen
-
-Die Verbesserung kommt also aus RISIKODISZIPLIN + DIVERSIFIKATION, nicht aus
-kluegerem Ranking. Das ist die ehrliche Lehre: bei diesem Rauschabstand gewinnt
-man durch Vermeiden der Verlustfenster, nicht durch Return-Chasing.
-
-Reproduzieren:
-    PYTHONPATH=. python3 experiments/signal_power.py
-    PYTHONPATH=. python3 experiments/strategy_variants.py
+Strenge Filter und breite Streuung senken das Verlustrisiko. Der Live-Bot haelt
+aber nur 4 Positionen (config.py -> max_positions), weil das Spielkapital klein
+ist und pro Deposit 20 USDC noetig sind. Das ist die riskanteste Variante.
 
 
 Papertrading (paper.py)

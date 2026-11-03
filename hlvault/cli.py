@@ -146,22 +146,53 @@ def cmd_fetch_cache(args) -> int:
 
     print("Lade Vault-Liste ...", flush=True)
     raw = api.fetch_all_vaults()
-    cands = screener.prefilter(raw, CONFIG)
-    print(f"{len(raw)} Vaults -> {len(cands)} nach Vorfilter", flush=True)
-    cands = cands[: CONFIG.top_n_detail]
+    if args.all:
+        wanted = [v["summary"] for v in
+                  screener.backtest_universe(raw, args.min_pnl, CONFIG)]
+        print(f"{len(raw)} Vaults -> {len(wanted)} fuers Universum "
+              f"(davon {sum(bool(s.get('isClosed')) for s in wanted)} geschlossen)",
+              flush=True)
+        meta = {s["vaultAddress"]: {"name": s.get("name", "?"),
+                                    "leader": s.get("leader", "")} for s in wanted}
+    else:
+        cands = screener.prefilter(raw, CONFIG)
+        print(f"{len(raw)} Vaults -> {len(cands)} nach Vorfilter", flush=True)
+        cands = cands[: CONFIG.top_n_detail]
+        meta = {c.address: {"name": c.name, "leader": c.leader} for c in cands}
 
-    def prog(i, n):
-        if i % 10 == 0 or i == n:
-            print(f"  Details {i}/{n}", flush=True)
+    def save() -> None:
+        tmp = args.out + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump({"details": details, "meta": meta,
+                       "fetched_at": fetched_at}, fh)
+        os.replace(tmp, args.out)
 
-    details = api.fetch_details_bulk([c.address for c in cands], on_progress=prog)
-    meta = {c.address: {"name": c.name, "leader": c.leader, "apr": c.apr}
-            for c in cands}
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    with open(args.out, "w") as fh:
-        json.dump({"details": details, "meta": meta,
-                   "fetched_at": int(time.time() * 1000)}, fh)
+    details: dict = {}
+    fetched_at = int(time.time() * 1000)
+    if args.all and os.path.exists(args.out):
+        # Abgebrochenen Lauf fortsetzen. Der alte Zeitstempel bleibt, sonst
+        # wuerden die Stichtage ueber das Datenende der fruehen Abrufe rutschen.
+        with open(args.out) as fh:
+            prev = json.load(fh)
+        details, fetched_at = prev["details"], prev["fetched_at"]
+        print(f"Setze fort: {len(details)} schon im Cache", flush=True)
+
+    todo = [a for a in meta if a not in details]
+    # shortcut: alle 200 Vaults speichern, ein Abbruch kostet hoechstens so viele
+    for start in range(0, len(todo), 200):
+        chunk = todo[start:start + 200]
+        details.update(api.fetch_details_bulk(chunk))
+        save()
+        print(f"  Details {start + len(chunk)}/{len(todo)}", flush=True)
+    save()
+
+    missing = len(meta) - len(details)
     print(f"\n{len(details)} Details gecacht -> {args.out}")
+    if missing:
+        print(f"WARNUNG: {missing} Vaults fehlen (Abruf fehlgeschlagen). "
+              f"Erneut starten holt sie nach." if args.all else
+              f"WARNUNG: {missing} Vaults fehlen (Abruf fehlgeschlagen).")
     return 0
 
 
@@ -190,29 +221,35 @@ def cmd_backtest(args) -> int:
     def f(x):
         return f"{x*100:+8.1f}%" if x is not None else "     n/a"
 
-    print(f"\nWalk-Forward-Backtest | Universum {res['n_vaults']} Vaults | "
-          f"K={res['k']} | Stichtage={args.cutoffs} | Gap={args.gap}d")
-    print("Ranking je Stichtag NUR aus Daten bis dahin (out-of-sample).\n")
+    print(f"\nWalk-Forward-Backtest | Cache {res['n_vaults']} Vaults, davon "
+          f"{res['n_closed']} geschlossen | K={res['k']} | Stichtage={args.cutoffs}")
+    print("Ranking je Stichtag NUR aus Daten bis dahin. Renditen nach Profit-Share.\n")
     for H, blk in res["horizons"].items():
-        print(f"===== Forward-Horizont {H} Tage =====")
-        print(f"{'Stichtag':12} {'qual':>4} {'Score-Top':>10} {'APR-Top':>9}"
-              f" {'Gleichgew':>10} {'Score-Bot':>10} {'Universum':>10}")
+        print(f"===== Forward-Horizont {H} Tage, Abstand {blk['gap_days']} Tage =====")
+        if blk["overlapping"]:
+            print("ACHTUNG: Fenster ueberlappen, die Stichtage sind nicht unabhaengig.")
+        print(f"{'Stichtag':12} {'qual':>4} {'Score-Top':>10} {'CAGR-Filt':>10}"
+              f" {'CAGR-Naiv':>10} {'Gleichgew':>10} {'Score-Bot':>10} {'Universum':>10}")
         for w in blk["windows"]:
             s = w["strat"]
             print(f"{str(d(w['cutoff_ms'])):12} {w['qualified']:>4}  "
-                  f"{f(s.get('score_top'))} {f(s.get('apr_top'))} "
-                  f"{f(s.get('equal_qualified'))} {f(s.get('score_bottom'))} "
-                  f"{f(s.get('universe'))}")
+                  f"{f(s.get('score_top'))}  {f(s.get('cagr_top_filtered'))}  "
+                  f"{f(s.get('cagr_top_naive'))}  {f(s.get('equal_qualified'))}  "
+                  f"{f(s.get('score_bottom'))}  {f(s.get('universe'))}")
         sm = blk["summary"]
-        print("  --- Mittel ueber Stichtage ---")
-        labels = {"score_top": "Score-Top-K", "apr_top": "APR-Top-K (naiv)",
-                  "equal_qualified": "Gleichgewicht", "score_bottom": "Score-Bottom-K",
-                  "universe": "ganzes Universum"}
-        for name in ["score_top", "apr_top", "equal_qualified",
-                     "score_bottom", "universe"]:
+        labels = {"score_top": "Score-Top-K", "cagr_top_filtered": "CAGR-Top-K gefiltert",
+                  "cagr_top_naive": "CAGR-Top-K naiv", "equal_qualified": "Gleichgewicht",
+                  "equal_no_leader": "Gleichgew. o. Leader",
+                  "score_bottom": "Score-Bottom-K", "universe": "Universum"}
+        print(f"\n  {'Strategie':22}{'Mittel':>9}{'Median':>9}{'Worst':>9}"
+              f"{'MaxDD':>9}{'Brutto':>9}  {'90%-Intervall':>17}   n")
+        for name, label in labels.items():
             if name in sm:
-                print(f"    {labels[name]:20} {sm[name]['mean_fwd']*100:+7.2f}%"
-                      f"   (n={sm[name]['windows']})")
+                x = sm[name]
+                print(f"  {label:22}{f(x['mean_fwd'])} {f(x['median'])} {f(x['worst'])} "
+                      f"{f(x['worst_dd'])} {f(x['mean_gross'])}  "
+                      f"{x['ci90_low']*100:+7.1f}..{x['ci90_high']*100:+.1f}%"
+                      f"   {x['windows']}")
         print()
     if args.json:
         print(f"JSON -> {args.json}")
@@ -317,6 +354,10 @@ def main(argv=None) -> int:
     fc = sub.add_parser("fetch-cache",
                         help="Detaildaten einmal holen und cachen (fuer backtest)")
     fc.add_argument("--out", default=CACHE_PATH)
+    fc.add_argument("--all", action="store_true",
+                    help="auch geschlossene/geschrumpfte Vaults (lange Laufzeit, fortsetzbar)")
+    fc.add_argument("--min-pnl", type=float, default=5000.0,
+                    help="mit --all: Mindest-|PnL| fuer Vaults unter dem TVL-Filter")
     fc.set_defaults(func=cmd_fetch_cache)
 
     bt = sub.add_parser("backtest",
@@ -325,7 +366,8 @@ def main(argv=None) -> int:
     bt.add_argument("--horizons", default="60,90",
                     help="Forward-Fenster in Tagen, komma-getrennt")
     bt.add_argument("--cutoffs", type=int, default=6, help="Anzahl Stichtage")
-    bt.add_argument("--gap", type=int, default=60, help="Abstand der Stichtage (Tage)")
+    bt.add_argument("--gap", type=int, default=None,
+                    help="Abstand der Stichtage in Tagen (default: Horizont, ohne Ueberlappung)")
     bt.add_argument("-k", type=int, default=4, help="Portfoliogroesse (Top-K)")
     bt.add_argument("--json", help="Rohergebnis als JSON speichern")
     bt.set_defaults(func=cmd_backtest)

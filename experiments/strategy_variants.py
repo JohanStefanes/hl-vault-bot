@@ -22,6 +22,7 @@ import statistics
 import sys
 
 from hlvault import backtest as bt, metrics as m
+from hlvault.config import CONFIG
 
 MS_DAY = 86_400_000
 
@@ -29,6 +30,9 @@ MS_DAY = 86_400_000
 def qualify(mt, age, cfg):
     """Harte Ausschluesse. cfg ist ein dict mit den Schwellen."""
     if mt.n < cfg["min_pts"]:
+        return False
+    # Pflicht bei Caches mit geschlossenen Vaults: sonst zaehlen Mini-Vaults mit
+    if mt.tvl_now < CONFIG.filters.min_tvl:
         return False
     if mt.max_drawdown < -cfg["max_dd"]:
         return False
@@ -93,7 +97,7 @@ def equal_weight(basket, k=None):
 
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else "data/backtest_cache/wide.json"
+    path = sys.argv[1] if len(sys.argv) > 1 else "data/backtest_cache/snapshot.json"
     snap = json.load(open(path))
     details, meta, fetched = snap["details"], snap.get("meta") or {}, snap["fetched_at"]
 

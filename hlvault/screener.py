@@ -5,7 +5,7 @@ import math
 import time
 from dataclasses import dataclass, field
 
-from . import api, metrics as m
+from . import api, db, metrics as m
 from .config import CONFIG, Config
 
 
@@ -53,6 +53,31 @@ def prefilter(raw_vaults: list[dict], cfg: Config = CONFIG) -> list[Result]:
             apr=float(v.get("apr") or 0.0), age_days=age,
         ))
     out.sort(key=lambda r: -r.tvl)
+    return out
+
+
+def backtest_universe(raw_vaults: list[dict], min_pnl: float,
+                      cfg: Config = CONFIG) -> list[dict]:
+    """Vaults fuer den Backtest, inkl. geschlossener und geschrumpfter.
+
+    Der Vorfilter sieht nur den Stand von heute und wirft damit genau die
+    Vaults raus, die zwischenzeitlich abgestuerzt sind (Survivorship-Bias).
+    Darum zaehlt hier auch |PnL| >= min_pnl: das behaelt Gewinner wie Verlierer,
+    die mal echtes Kapital hatten, und spart tausende leere Vaults.
+    """
+    now_ms = time.time() * 1000
+    out = []
+    for v in raw_vaults:
+        s = v.get("summary") or {}
+        if (s.get("relationship") or {}).get("type") == "child":
+            continue
+        age = (now_ms - s.get("createTimeMillis", now_ms)) / 86_400_000
+        if age < cfg.filters.min_age_days:
+            continue
+        pnl = dict(v.get("pnls") or []).get("allTime") or []
+        peak_pnl = max((abs(float(x)) for x in pnl), default=0.0)
+        if float(s.get("tvl", 0)) >= cfg.filters.min_tvl or peak_pnl >= min_pnl:
+            out.append(v)
     return out
 
 
@@ -112,6 +137,7 @@ def run(cfg: Config = CONFIG, verbose: bool = True) -> tuple[list[Result], int]:
     if verbose:
         print("Lade Vault-Liste ...", flush=True)
     raw = api.fetch_all_vaults()
+    db.save_vault_list(db.connect(), raw)
     cands = prefilter(raw, cfg)
     if verbose:
         print(f"{len(raw)} Vaults -> {len(cands)} nach Vorfilter", flush=True)

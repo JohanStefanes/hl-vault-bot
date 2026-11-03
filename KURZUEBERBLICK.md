@@ -10,7 +10,7 @@ Stand 03.11.2026:
 
 1. **Liste holen:** Der Bot lädt alle 9.478 Vaults von Hyperliquid.
 2. **Grob aussortieren (90 übrig):** Der Vault muss offen sein, 50.000 $ bis 1 Mrd. $ verwalten und mindestens 90 Tage alt sein.
-3. **Hart filtern (14 übrig):** Maximaler Verlust vom Hoch höchstens 15 %, Schwankung höchstens 100 % pro Jahr, Trader mit mindestens 3 % eigenem Geld drin, Gebühr höchstens 15 %, Rendite positiv.
+3. **Hart filtern (15 übrig):** Maximaler Verlust vom Hoch höchstens 15 %, Schwankung höchstens 100 % pro Jahr, Trader mit mindestens 3 % eigenem Geld drin, Gebühr höchstens 15 %, Rendite positiv.
 4. **Punkte vergeben (0–100):** Sharpe 40 %, Drawdown 20 %, Alter 15 %, TVL-Stabilität 15 %, Rendite 10 %.
 5. **Mit Spielgeld testen:** Die besten 4 bekommen gleich viel virtuelles Geld. Bewertet wird mit den echten Vault-Renditen. Die Hyperliquid-Regeln gelten auch hier: mindestens 20 USDC pro Einzahlung, 1 Tag Sperrfrist, Gewinnanteil des Traders.
 
@@ -55,7 +55,8 @@ cd web/public && python3 -m http.server 8765
 | `watch` | Prüft auf Warnsignale gegenüber dem letzten Lauf |
 | `paper rebalance` | Schichtet das Spielgeld um, am besten einmal pro Woche |
 | `paper ledger` | Zeigt alle Spielgeld-Buchungen |
-| `fetch-cache`, danach `backtest` | Testet die Regeln an historischen Daten |
+| `fetch-cache --all --out data/backtest_cache/full.json` | Lädt die Historie inklusive geschlossener Vaults, rund 40 Minuten, fortsetzbar |
+| `backtest --cache data/backtest_cache/full.json` | Testet die Regeln an diesen Daten |
 
 Alle Stellschrauben stehen in `hlvault/config.py`:
 
@@ -68,30 +69,32 @@ Alle Stellschrauben stehen in `hlvault/config.py`:
 | `max_positions` | 4 | Anzahl Vaults im Portfolio |
 | `rotation_margin` | 8.0 | Punktevorsprung, ab dem ein Vault ersetzt wird |
 
-Guter erster Versuch: Einen Wert ändern und `backtest` erneut laufen lassen. Mit `max_drawdown = 0.10` sank die Gleichgewicht-Rendite über 90 Tage zum Beispiel von +7,32 % auf +5,82 %.
+Guter erster Versuch: Einen Wert ändern und `backtest` erneut laufen lassen. Die Tabelle unten zeigt, wie das Ergebnis aussieht. Ohne `--all` fehlen die geschlossenen Vaults, und die Zahlen fallen deutlich zu gut aus.
 
 Damit nichts schiefgeht:
 
 - `paper init` überschreibt dein bisheriges Spielgeld-Portfolio.
 - `export_web` ändert die versionierte Datei `web/public/data.json`. Zurücksetzen mit `git checkout web/public/data.json`.
 - `scripts/` nicht ausführen: Die Skripte enthalten Johans Pfade und deployen auf Johans Vercel-Projekt.
-- `experiments/` läuft im frischen Klon nicht, weil `data/backtest_cache/wide.json` fehlt.
+- `experiments/` braucht vorher `fetch-cache` und läuft mit `PYTHONPATH=.` (siehe README).
 
 ## Was der Test zeigt
 
-Die Filter schützen vor den großen Abstürzen, das Punkte-Ranking bringt dagegen keinen belegbaren Vorteil. Backtest über 90 Tage, 6 Stichtage, Daten vom 03.11.2026, 4 Vaults pro Strategie:
+Die Filter senken das Verlustrisiko, ein Renditevorteil ist aber nicht belegt. Backtest über 6 Zeiträume von je 90 Tagen, nach Gebühren, mit 1.711 Vaults, davon 919 geschlossen (Stand 03.11.2026):
 
-| Strategie | Mittel | Schlechtestes Fenster |
-| --- | --- | --- |
-| Die 4 mit der höchsten Rendite (APR) | +19,23 % | −3,2 % |
-| Die 4 schlechtesten Scores unter den Gefilterten | +7,76 % | +0,5 % |
-| Gleich viel in alle Gefilterten | +7,32 % | +2,8 % |
-| Die 4 besten Scores | +7,29 % | +0,1 % |
-| Alle Vaults ohne Filter | −27,77 % | −110,8 % |
+| Strategie | Mittel | Schlechtester Zeitraum | 90-%-Intervall des Mittels |
+| --- | --- | --- | --- |
+| Die 4 schlechtesten Scores unter den Gefilterten | +5,0 % | −1,6 % | +0,6 bis +11,3 % |
+| Die 4 mit der höchsten bisherigen Rendite, ohne Risikofilter | +3,4 % | −48,0 % | −15,3 bis +19,0 % |
+| Gleich viel in alle Gefilterten | +0,4 % | −5,7 % | −2,2 bis +2,9 % |
+| Alle Vaults, die den Vorfilter bestehen | −0,5 % | −9,6 % | −5,7 bis +4,9 % |
+| Die 4 mit der höchsten bisherigen Rendite, gefiltert | −1,2 % | −13,3 % | −5,9 bis +2,7 % |
+| Die 4 besten Scores | −1,8 % | −26,4 % | −10,7 bis +4,2 % |
 
 So solltest du das lesen:
 
-- **Nach Rendite sortieren lag hier vorn**, hatte aber als einzige gefilterte Strategie ein Verlustfenster. Das README nennt diese Methode noch „widerlegt“, das geben die aktuellen Daten nicht her.
-- **Die Zahlen sind zu optimistisch:** Geschlossene Vaults fehlen in den Daten, und 6 Stichtage sind wenig.
-- **Werte unter −100 %** sind ein Rechenartefakt, mehr als den Einsatz kann man nicht verlieren.
+- **Die Punktzahl bringt nichts Messbares:** Die 4 schlechtesten Scores lagen sogar vor den 4 besten. Das ist vermutlich Zufall, spricht aber nicht für das Ranking.
+- **Breite Streuung schützt:** Gleich viel in alle Gefilterten verlor im schlechtesten Zeitraum 5,7 %, die reine Rendite-Jagd 48 %.
+- **4 Vaults sind riskant:** Zwei Vaults mit −93 % und −51 % drückten die Top 4 auf −26,4 %. Das Spielgeld-Portfolio hält trotzdem nur 4 Vaults, weil das Startkapital klein ist.
+- **Die Aussagekraft ist begrenzt:** 6 Zeiträume sind wenig, und kleine geschlossene Vaults fehlen weiterhin in den Daten.
 - **Die Vergangenheit sagt wenig über die Zukunft.** Echtes Geld kann in Vaults komplett verloren gehen, und das hier ist keine Anlageberatung.

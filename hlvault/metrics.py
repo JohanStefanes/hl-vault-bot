@@ -53,6 +53,22 @@ def _series(portfolio: list, key: str) -> dict:
     return {}
 
 
+def period_return(eq_prev: float, eq_cur: float,
+                  pnl_prev: float, pnl_cur: float) -> float | None:
+    """Rendite eines Intervalls, bereinigt um Zufluesse (Modified Dietz).
+
+    Die Serien sind gebinnt: ein Vault mit $100 kann im selben Intervall $500k
+    einsammeln und $12k verlieren. dPnL / eq_prev waere dann -12100%. Zufluesse
+    zaehlen darum halb zur Basis. Abfluesse nicht, das Kapital war zu Beginn da.
+    None wenn der Vault praktisch leer war.
+    """
+    if eq_prev <= 1.0:
+        return None
+    d_pnl = pnl_cur - pnl_prev
+    inflow = max((eq_cur - eq_prev) - d_pnl, 0.0)
+    return max(d_pnl / (eq_prev + 0.5 * inflow), -1.0)
+
+
 def compute(detail: dict, period: str = "allTime") -> Metrics | None:
     """Kennzahlen aus vaultDetails. None wenn die Datenlage zu duenn ist."""
     pf = detail.get("portfolio") or []
@@ -68,10 +84,9 @@ def compute(detail: dict, period: str = "allTime") -> Metrics | None:
 
     rets: list[float] = []
     for i in range(1, len(equity)):
-        base = equity[i - 1]
-        if base <= 1.0:            # Vault war praktisch leer -> Rendite bedeutungslos
-            continue
-        rets.append((cum_pnl[i] - cum_pnl[i - 1]) / base)
+        r = period_return(equity[i - 1], equity[i], cum_pnl[i - 1], cum_pnl[i])
+        if r is not None:
+            rets.append(r)
     if len(rets) < 3:
         return None
 

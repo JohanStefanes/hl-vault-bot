@@ -96,7 +96,7 @@ def collect(snapshot_path, horizon_days, n_cutoffs=6, gap_days=60):
 
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else "data/backtest_cache/wide.json"
+    path = sys.argv[1] if len(sys.argv) > 1 else "data/backtest_cache/snapshot.json"
     for H in (60, 90):
         rows = collect(path, H)
         fwd = [r["fwd"] for r in rows]
